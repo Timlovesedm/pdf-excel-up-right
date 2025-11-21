@@ -218,12 +218,13 @@ def process_files_and_tables_vertical(excel_file):
 
 
 # ==========================================
-# ツール②：横方向統合ロジック (Horizontal) - 再構築版
+# ツール②：横方向統合ロジック (Horizontal) - 最終完成版
 # ==========================================
 
 def split_into_horizontal_blocks(df):
     """
     空白列を区切りとして、DataFrameを複数の「ブロック（表）」に分割する関数
+    シートの右端まで全ての列を走査します。
     """
     blocks = []
     current_cols = []
@@ -346,10 +347,7 @@ def process_files_and_tables_horizontal(excel_file):
         st.error(f"Excelファイル読み込み失敗: {e}")
         return None
 
-    # 1. ファイル名行などで大きなチャンクに分ける（Tool 1の出力形式依存）
-    # ただし、横方向の場合は1シートにまとめて貼り付けられていることが多いので
-    # まずは行ごとの区切り（ファイル名）で分割し、その中でさらに「ブロック」を探す
-    
+    # 1. ファイル名行などで大きなチャンクに分ける
     df_full = df_full.astype(str)
     file_indices = df_full[df_full[0].str.contains(r"ファイル名:", na=False)].index.tolist()
     
@@ -359,8 +357,6 @@ def process_files_and_tables_horizontal(excel_file):
     else:
         for i in range(len(file_indices)):
             start_idx = file_indices[i]
-            # ファイル名行自体はデータではないのでスキップしたいが、
-            # チャンクとして渡して後で除外する
             end_idx = file_indices[i + 1] if i + 1 < len(file_indices) else len(df_full)
             file_chunks.append(df_full.iloc[start_idx:end_idx].reset_index(drop=True))
 
@@ -368,7 +364,7 @@ def process_files_and_tables_horizontal(excel_file):
     all_item_orders = []
 
     for chunk in file_chunks:
-        # "ファイル名:" や "--- ページ" などのメタデータ行を除外して純粋な表データにする
+        # メタデータ行を除外
         clean_rows = []
         for idx, row in chunk.iterrows():
             row_txt = row.astype(str).str.cat()
@@ -381,7 +377,7 @@ def process_files_and_tables_horizontal(excel_file):
             
         df_clean = pd.DataFrame(clean_rows)
         
-        # 2. 空白列でブロック分割
+        # 2. 空白列でブロック分割（これで横方向にある全データを取得）
         blocks = split_into_horizontal_blocks(df_clean)
         
         # 3. 各ブロックからデータを抽出
@@ -411,7 +407,7 @@ def process_files_and_tables_horizontal(excel_file):
             if item in master_items:
                 last_known_idx = master_items.index(item)
             else:
-                # 未知の項目（Bなど）は、直前の既知項目の後ろに挿入
+                # 未知の項目は、直前の既知項目の後ろに挿入
                 master_items.insert(last_known_idx + 1, item)
                 last_known_idx += 1
 
@@ -425,7 +421,7 @@ def process_files_and_tables_horizontal(excel_file):
         # マージ
         merged = pd.merge(final_df, df, on="共通項目", how="left")
         
-        # 既に同じ年がある場合は update (combine_first)
+        # 既に同じ年がある場合は update
         if year_col in final_df.columns:
              final_df[year_col] = final_df[year_col].combine_first(merged[year_col])
         else:
@@ -434,9 +430,9 @@ def process_files_and_tables_horizontal(excel_file):
     # 6. 0埋めと整形
     final_df = final_df.fillna(0)
     
-    # 年次順に並べ替え（降順）
+    # 年次順に並べ替え（昇順：小さい順） reverse=False に変更
     cols = [c for c in final_df.columns if c != "共通項目"]
-    cols.sort(key=lambda x: float(re.findall(r'\d+', str(x))[0]) if re.findall(r'\d+', str(x)) else 0, reverse=True)
+    cols.sort(key=lambda x: float(re.findall(r'\d+', str(x))[0]) if re.findall(r'\d+', str(x)) else 0, reverse=False)
     
     final_df = final_df[["共通項目"] + cols]
     
