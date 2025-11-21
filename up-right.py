@@ -158,8 +158,8 @@ def tool2_extract_data_horizontal(df_chunk):
     if not year_columns:
         return None, []
     
-    # 年次で降順ソート（新しい年が左に）
-    year_columns.sort(key=lambda x: int(x["year"]), reverse=True)
+    # 年次で昇順ソート（古い年が左に）
+    year_columns.sort(key=lambda x: int(x["year"]))
     
     # データを抽出（1行目はヘッダーなのでスキップ）
     items = []
@@ -212,8 +212,6 @@ def tool2_extract_data_horizontal(df_chunk):
         result_dict[year] = year_values
     
     result_df = pd.DataFrame(result_dict)
-    
-    # 「その他」の重複処理は不要（既に別の行として扱われている）
     
     # 項目の順序を保存
     item_order = result_df["共通項目"].tolist()
