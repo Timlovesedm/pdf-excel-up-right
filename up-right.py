@@ -117,43 +117,159 @@ def tool2_extract_data_from_chunk(df_chunk):
     return df_result, all_items_ordered
 
 
-# --- ツール②：横方向統合関数（新規追加） ---
+# --- ツール②：横方向統合関数（完全リニューアル） ---
+def detect_horizontal_blocks(df_chunk):
+    """横方向の表ブロックを検出する"""
+    if df_chunk.empty:
+        return []
+    
+    # 空列を検出（ブロック間の区切りとして使用）
+    empty_cols = []
+    for col_idx in range(df_chunk.shape[1]):
+        col_data = df_chunk.iloc[:, col_idx].astype(str).str.strip()
+        if col_data.replace("", pd.NA).isna().all():
+            empty_cols.append(col_idx)
+    
+    # ブロックの範囲を特定
+    blocks = []
+    start_col = 0
+    
+    for empty_col in empty_cols:
+        if empty_col > start_col:
+            blocks.append((start_col, empty_col - 1))
+        start_col = empty_col + 1
+    
+    # 最後のブロック
+    if start_col < df_chunk.shape[1]:
+        blocks.append((start_col, df_chunk.shape[1] - 1))
+    
+    # ブロックが検出されなかった場合は全体を1つのブロックとする
+    if not blocks:
+        blocks = [(0, df_chunk.shape[1] - 1)]
+    
+    return blocks
+
+
+def extract_block_data(df_chunk, start_col, end_col):
+    """1つの表ブロックからデータを抽出（左端の項目と右端の数値）"""
+    block_df = df_chunk.iloc[:, start_col:end_col+1].copy()
+    
+    if block_df.empty or block_df.shape[1] < 1:
+        return None, None
+    
+    # 左端列（項目列）を取得
+    item_col = block_df.iloc[:, 0].astype(str).str.strip()
+    item_col = item_col[item_col != ""]
+    
+    if item_col.empty:
+        return None, None
+    
+    # 右端列（数値列）を取得
+    value_col = block_df.iloc[:, -1].astype(str).str.strip()
+    
+    # 右端列の一番上の数値を取得（年次ヘッダー）
+    year_header = None
+    for val in value_col:
+        # 数値に変換できるかチェック
+        clean_val = val.replace(",", "").strip()
+        if clean_val.isdigit():
+            year_header = int(clean_val)
+            break
+    
+    # データを結合
+    result_data = []
+    for i in range(len(item_col)):
+        if i < len(value_col):
+            item = item_col.iloc[i]
+            value = value_col.iloc[i]
+            result_data.append({"item": item, "value": value})
+    
+    return result_data, year_header
+
+
 def tool2_extract_data_horizontal(df_chunk):
     """横方向のデータを統合する関数"""
     if df_chunk.empty:
         return None, []
     
-    # 一番左の列を項目として取得
-    items_col = df_chunk.iloc[:, 0].astype(str).str.strip()
-    items_col = items_col[items_col != ""].dropna()
+    # 横方向の表ブロックを検出
+    blocks = detect_horizontal_blocks(df_chunk)
     
-    if items_col.empty:
+    if not blocks:
         return None, []
     
-    # 一番右の列を数値として取得
-    rightmost_col_idx = df_chunk.shape[1] - 1
-    values_col = df_chunk.iloc[:, rightmost_col_idx]
+    # 各ブロックからデータを抽出
+    all_block_data = []
+    for start_col, end_col in blocks:
+        block_data, year_header = extract_block_data(df_chunk, start_col, end_col)
+        if block_data and year_header:
+            all_block_data.append({
+                "year": year_header,
+                "data": block_data
+            })
     
-    # 項目と数値を結合
-    result_df = pd.DataFrame({
-        "共通項目": items_col.values,
-        "数値": values_col.values
-    })
+    if not all_block_data:
+        return None, []
     
-    # 「その他」の重複対応
-    is_sonota = result_df["共通項目"] == "その他"
-    if is_sonota.any():
-        sonota_counts = result_df.groupby("共通項目").cumcount()
-        result_df.loc[is_sonota, "共通項目"] = "その他_temp_" + sonota_counts[is_sonota].astype(str)
+    # 年次でソート（昇順）
+    all_block_data.sort(key=lambda x: x["year"])
     
-    # 数値変換
-    result_df["数値"] = pd.to_numeric(
-        result_df["数値"].astype(str).str.replace(",", ""), 
-        errors='coerce'
-    ).fillna(0)
+    # 全項目を収集（和集合）
+    all_items = []
+    item_to_index = {}
+    
+    for block in all_block_data:
+        for entry in block["data"]:
+            item = entry["item"]
+            # 「その他」の重複対応
+            if item == "その他":
+                # 既存の「その他」の数をカウント
+                temp_count = sum(1 for existing_item in all_items if existing_item.startswith("その他"))
+                if temp_count > 0:
+                    item = f"その他_temp_{temp_count}"
+            
+            if item not in item_to_index:
+                item_to_index[item] = len(all_items)
+                all_items.append(item)
+    
+    # 結果DataFrameを構築
+    result_dict = {"共通項目": all_items}
+    
+    for block in all_block_data:
+        year = str(block["year"])
+        values = [0] * len(all_items)
+        
+        for entry in block["data"]:
+            item = entry["item"]
+            value_str = entry["value"]
+            
+            # 「その他」の重複対応
+            if item == "その他":
+                # 既存のインデックスを探す
+                matching_items = [k for k in item_to_index.keys() if k.startswith("その他")]
+                for match in matching_items:
+                    if item_to_index[match] < len(values) and values[item_to_index[match]] == 0:
+                        item = match
+                        break
+            
+            if item in item_to_index:
+                idx = item_to_index[item]
+                # 数値変換
+                clean_value = value_str.replace(",", "").strip()
+                try:
+                    values[idx] = float(clean_value) if clean_value else 0
+                except:
+                    values[idx] = 0
+        
+        result_dict[year] = values
+    
+    result_df = pd.DataFrame(result_dict)
+    
+    # 「その他_temp_」を「その他」に戻す
+    result_df["共通項目"] = result_df["共通項目"].str.replace(r"_temp_\d+$", "", regex=True)
     
     # 項目の順序を保存
-    item_order = result_df["共通項目"].drop_duplicates().tolist()
+    item_order = result_df["共通項目"].tolist()
     
     return result_df, item_order
 
@@ -254,7 +370,7 @@ def process_files_and_tables_vertical(excel_file):
 
 
 def process_files_and_tables_horizontal(excel_file):
-    """横方向の統合処理（新規）"""
+    """横方向の統合処理（完全版）"""
     try:
         xls = pd.ExcelFile(excel_file)
         sheet_name_to_read = "抽出結果" if "抽出結果" in xls.sheet_names else xls.sheet_names[0]
@@ -263,7 +379,9 @@ def process_files_and_tables_horizontal(excel_file):
         st.error(f"Excelファイル読み込み失敗: {e}")
         return None
 
-    df_full[0] = df_full[0].astype(str)
+    df_full = df_full.astype(str)
+    
+    # ファイル名でチャンクを分割
     file_indices = df_full[df_full[0].str.contains(r"ファイル名:", na=False)].index.tolist()
     file_chunks = []
     if not file_indices:
@@ -274,13 +392,13 @@ def process_files_and_tables_horizontal(excel_file):
             end_idx = file_indices[i + 1] if i + 1 < len(file_indices) else len(df_full)
             file_chunks.append(df_full.iloc[start_idx:end_idx].reset_index(drop=True))
 
-    grouped_tables = defaultdict(list)
-    master_item_order = defaultdict(list)
+    all_table_results = []
 
     for file_chunk in file_chunks:
+        # ページ区切りを検出
         page_indices = file_chunk[file_chunk[0].str.contains(r"--- ページ", na=False)].index.tolist()
         table_chunks = []
-        last_idx = 0
+        
         if not page_indices:
             clean_chunk = file_chunk[
                 ~file_chunk[0].str.contains(r"ファイル名:|---|^\s*$", na=False, regex=True)
@@ -288,71 +406,85 @@ def process_files_and_tables_horizontal(excel_file):
             if not clean_chunk.empty:
                 table_chunks.append(clean_chunk)
         else:
+            last_idx = 0
             for idx in page_indices:
                 chunk = file_chunk.iloc[last_idx:idx]
-                if not chunk.empty:
-                    table_chunks.append(chunk)
+                clean_chunk = chunk[
+                    ~chunk[0].str.contains(r"ファイル名:|---", na=False, regex=True)
+                ].dropna(how="all")
+                if not clean_chunk.empty:
+                    table_chunks.append(clean_chunk)
                 last_idx = idx
+            
             final_chunk = file_chunk.iloc[last_idx:]
-            if not final_chunk.empty:
-                table_chunks.append(final_chunk)
-
-        for i, table_chunk in enumerate(table_chunks):
-            clean_table_chunk = table_chunk[
-                ~table_chunk[0].str.contains(r"ファイル名:|---", na=False, regex=True)
+            clean_chunk = final_chunk[
+                ~final_chunk[0].str.contains(r"ファイル名:|---", na=False, regex=True)
             ].dropna(how="all")
-            if clean_table_chunk.empty:
+            if not clean_chunk.empty:
+                table_chunks.append(clean_chunk)
+
+        # 各テーブルチャンクを処理
+        for table_chunk in table_chunks:
+            if table_chunk.empty:
                 continue
             
-            # 横方向の抽出を実行
             processed_df, item_order = tool2_extract_data_horizontal(
-                clean_table_chunk.reset_index(drop=True)
+                table_chunk.reset_index(drop=True)
             )
             
             if processed_df is not None and not processed_df.empty:
-                grouped_tables[i].append(processed_df)
-                current_master_order = master_item_order[i]
-                if not current_master_order:
-                    master_item_order[i].extend(item_order)
-                else:
-                    # 和集合として項目を統合
-                    last_known_index = -1
-                    for item in item_order:
-                        if item in current_master_order:
-                            last_known_index = current_master_order.index(item)
-                        else:
-                            current_master_order.insert(last_known_index + 1, item)
-                            last_known_index += 1
+                all_table_results.append(processed_df)
 
-    final_summaries = []
-    for table_index in sorted(grouped_tables.keys()):
-        list_of_dfs = grouped_tables[table_index]
-        ordered_items = master_item_order[table_index]
-        if not list_of_dfs:
-            continue
+    if not all_table_results:
+        return None
+
+    # 全テーブルの結果をマージ
+    if len(all_table_results) == 1:
+        final_summaries = all_table_results
+    else:
+        # 複数のテーブルがある場合は、共通項目で統合
+        final_summaries = []
         
-        # マスター項目リストを作成
-        result_df = pd.DataFrame({"共通項目": ordered_items})
+        # 全項目の和集合を取得
+        all_items_set = set()
+        for df in all_table_results:
+            all_items_set.update(df["共通項目"].tolist())
         
-        # 各テーブルから抽出したデータをマージ
-        for idx, df_to_merge in enumerate(list_of_dfs):
-            # 列名を「ファイルN」に変更
-            col_name = f"ファイル{idx+1}"
-            df_to_merge = df_to_merge.rename(columns={"数値": col_name})
-            result_df = pd.merge(result_df, df_to_merge, on="共通項目", how="left")
+        all_items = sorted(list(all_items_set))
         
-        result_df.fillna(0, inplace=True)
+        # 全年次を収集
+        all_years = set()
+        for df in all_table_results:
+            year_cols = [col for col in df.columns if col != "共通項目"]
+            all_years.update(year_cols)
         
-        # 数値列を整数型に変換
-        for col in result_df.columns:
-            if col != "共通項目":
-                result_df[col] = pd.to_numeric(result_df[col], errors='coerce').fillna(0).astype(int)
+        # 年次でソート
+        sorted_years = sorted(all_years, key=lambda x: int(str(x)))
         
-        # 「その他_temp_」を削除
-        result_df["共通項目"] = result_df["共通項目"].str.replace(r"_temp_\d+$", "", regex=True)
+        # 結果DataFrameを構築
+        result_df = pd.DataFrame({"共通項目": all_items})
         
-        final_summaries.append(result_df)
-    
+        for year in sorted_years:
+            year_values = []
+            for item in all_items:
+                # この項目とこの年のデータを探す
+                found_value = 0
+                for df in all_table_results:
+                    if year in df.columns:
+                        item_rows = df[df["共通項目"] == item]
+                        if not item_rows.empty:
+                            found_value = item_rows[year].iloc[0]
+                            break
+                year_values.append(found_value)
+            
+            result_df[year] = year_values
+        
+        # 数値型に変換
+        for year in sorted_years:
+            result_df[year] = pd.to_numeric(result_df[year], errors='coerce').fillna(0).astype(int)
+        
+        final_summaries = [result_df]
+
     return final_summaries
 
 
@@ -420,7 +552,7 @@ with st.container(border=True):
         "データの統合方向：",
         options=["縦方向", "横方向"],
         horizontal=True,
-        help="縦方向：年次データが縦に並んでいる場合 / 横方向：項目が左、数値が右に並んでいる場合"
+        help="縦方向：年次データが縦に並んでいる場合 / 横方向：表が横に複数並んでいる場合（各ブロックの左端項目と右端数値を統合）"
     )
     
     if st.button("統合まとめ表を作成 ▶️", disabled=(excel_file is None)):
@@ -432,6 +564,12 @@ with st.container(border=True):
             
             if all_summaries:
                 st.success(f"{len(all_summaries)}個のまとめ表を作成！", icon="✅")
+                
+                # プレビュー表示
+                for i, summary_df in enumerate(all_summaries):
+                    st.subheader(f"統合まとめ表_{i+1}")
+                    st.dataframe(summary_df, use_container_width=True)
+                
                 output_excel = io.BytesIO()
                 with pd.ExcelWriter(output_excel, engine="xlsxwriter") as writer:
                     for i, summary_df in enumerate(all_summaries):
@@ -452,3 +590,5 @@ with st.container(border=True):
                     file_name=download_filename,
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
+            else:
+                st.warning("統合可能なデータが見つかりませんでした。", icon="⚠️")
