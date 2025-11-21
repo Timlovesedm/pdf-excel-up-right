@@ -48,7 +48,7 @@ def extract_tables_from_multiple_pdfs(pdf_files, keywords, start_page, end_page)
 
 
 # ==========================================
-# ツール②：縦方向統合ロジック
+# ツール②：縦方向統合ロジック (Vertical)
 # ==========================================
 
 def tool2_extract_data_from_chunk_vertical(df_chunk):
@@ -218,18 +218,21 @@ def process_files_and_tables_vertical(excel_file):
 
 
 # ==========================================
-# ツール②：横方向統合ロジック（修正版）
+# ツール②：横方向統合ロジック (Horizontal) - 更新版
 # ==========================================
 
 def tool2_extract_data_horizontal(df_chunk):
     """
     横方向のデータを抽出する関数
-    数値がない場合は0として扱う処理を含みます
+    【適用したロジック】
+    1. 正規表現による厳密な年次ヘッダー特定（縦方向と同等）
+    2. 「その他」などの重複項目への _temp_X サフィックス付与
+    3. 数値のクレンジングと0埋め
     """
     if df_chunk.empty:
         return None, []
     
-    # 1行目から列の構造を解析
+    # 1行目（ヘッダー行と仮定）から年次列を特定します
     first_row = df_chunk.iloc[0] if len(df_chunk) > 0 else pd.Series()
     
     # 共通項目列を検出（通常は一番左の列）
@@ -243,42 +246,78 @@ def tool2_extract_data_horizontal(df_chunk):
     if item_col_idx is None:
         item_col_idx = 0 
     
-    # 年次列を検出（4桁の数字）
+    # 縦方向統合と同じ正規表現パターン + シンプルな4桁年パターン
+    quarter_pat = re.compile(r"^\s*(20\d{2}Q[1-4])\s*$", re.IGNORECASE)
+    from_date_pat = re.compile(r"\(自\s*(\d{4})年(\d{1,2})月")
+    date_pat = re.compile(r"\((\d{4})年(\d{1,2})月") 
+    year_pat = re.compile(r"^\s*20\d{2}(\d{2})?\s*$")
+    simple_year_pat = re.compile(r"20\d{2}") # ヘッダーに年数だけが含まれるケース用
+
     year_columns = []
     for col_idx in range(len(first_row)):
         if col_idx == item_col_idx:
             continue
+        
         cell_value = str(first_row.iloc[col_idx]).strip()
-        # 4桁の年次、あるいは 24/3 などの形式に対応
-        if (cell_value.isdigit() and len(cell_value) == 4) or re.match(r'20\d{2}', cell_value):
+        year_header = None
+
+        # パターンマッチング
+        match_q = quarter_pat.search(cell_value)
+        match1 = from_date_pat.search(cell_value)
+        match2 = date_pat.search(cell_value)
+        
+        if match_q:
+            year_header = match_q.group(1).upper()
+        elif match1:
+            year = match1.group(1)
+            month = match1.group(2)
+            year_header = f"{year}/{month}"
+        elif match2:
+            year = match2.group(1)
+            month = match2.group(2)
+            year_header = f"{year}/{month}"
+        elif simple_year_pat.search(cell_value): # 単純な2024なども拾う
+            nums = re.findall(r"20\d{2}", cell_value)
+            if nums:
+                year_header = nums[0]
+        
+        if year_header:
             year_columns.append({
                 "col_idx": col_idx,
-                "year": cell_value
+                "year": year_header
             })
     
     if not year_columns:
         return None, []
     
-    # データを抽出
     items = []
     data_by_year = {yc["year"]: [] for yc in year_columns}
     
+    # 重複管理用のカウンタ
+    item_name_counter = defaultdict(int)
+    
     for row_idx in range(1, df_chunk.shape[0]):
         # 項目名を取得
-        item = str(df_chunk.iloc[row_idx, item_col_idx]).strip()
+        raw_item = str(df_chunk.iloc[row_idx, item_col_idx]).strip()
         
         # 項目が有効な場合のみ追加
-        if item and item != "nan" and item != "":
-            # 重複項目がある場合はナンバリングで区別（念のため）
-            original_item = item
-            count = 1
-            while item in items:
-                item = f"{original_item}_{count}"
-                count += 1
+        if raw_item and raw_item != "nan" and raw_item != "":
+            # 重複項目の処理
+            count = item_name_counter[raw_item]
+            item_name_counter[raw_item] += 1
+            
+            if raw_item == "その他":
+                # "その他"の場合は強制的にサフィックスをつける
+                item = f"{raw_item}_temp_{count}"
+            elif count > 0:
+                # その他の項目でも重複があればサフィックスをつける
+                item = f"{raw_item}_{count}"
+            else:
+                item = raw_item
             
             items.append(item)
             
-            # 各年次の値を取得
+            # 各年次の値を取得（数値処理）
             for yc in year_columns:
                 value_str = str(df_chunk.iloc[row_idx, yc["col_idx"]]).strip()
                 
@@ -309,7 +348,7 @@ def tool2_extract_data_horizontal(df_chunk):
     result_dict = {"共通項目": items}
     for yc in year_columns:
         current_data = data_by_year[yc["year"]]
-        # 行数不一致ガード
+        # 行数が合わない場合のガード
         if len(current_data) < len(items):
             current_data.extend([0] * (len(items) - len(current_data)))
         elif len(current_data) > len(items):
@@ -324,8 +363,7 @@ def tool2_extract_data_horizontal(df_chunk):
 def process_files_and_tables_horizontal(excel_file):
     """
     横方向の統合処理（完全版）
-    異なる項目を持つ複数の表を、項目の和集合（ユニオン）をとって統合します。
-    値が存在しない箇所は0で埋められます。
+    縦方向統合と同様のロジック（和集合統合・順序学習）を適用
     """
     try:
         xls = pd.ExcelFile(excel_file)
@@ -353,7 +391,7 @@ def process_files_and_tables_horizontal(excel_file):
     all_item_lists = []
 
     for file_chunk in file_chunks:
-        # ページ区切りなどを除去してクリーンなテーブルブロックを探す
+        # テーブルブロックの検出
         rows_to_process = []
         current_block = []
         
@@ -362,9 +400,8 @@ def process_files_and_tables_horizontal(excel_file):
             if "ファイル名:" in str(row[0]) or "--- ページ" in str(row[0]):
                 continue
             
-            # 有効なデータ行か判定
+            # 有効なデータ行か判定（空行区切りロジック）
             if row.astype(str).str.strip().eq("nan").all() or row.astype(str).str.strip().eq("").all():
-                # 空行が来たらブロック終了
                 if current_block:
                     rows_to_process.append(pd.DataFrame(current_block))
                     current_block = []
@@ -385,9 +422,9 @@ def process_files_and_tables_horizontal(excel_file):
     if not extracted_dfs:
         return None
 
-    # --- 和集合・順序保持統合ロジック ---
+    # --- ロジック4：順序学習とマージ ---
 
-    # 1. 全ての項目リストを統合してマスター項目リストを作成
+    # 1. 全ての項目リストを統合してマスター項目リストを作成（順序保持）
     master_items = []
     for items in all_item_lists:
         if not master_items:
@@ -399,14 +436,14 @@ def process_files_and_tables_horizontal(excel_file):
             if item in master_items:
                 last_known_index = master_items.index(item)
             else:
-                # 未知の項目は、最後に見つけた既知の項目の後ろに挿入
+                # 新しい項目を知っている項目の後ろに挿入
                 master_items.insert(last_known_index + 1, item)
                 last_known_index += 1
 
     # 2. マスター項目リストを持つベースDataFrameを作成
     final_df = pd.DataFrame({"共通項目": master_items})
 
-    # 3. 各抽出データをマージ
+    # 3. 各抽出データを「左側結合（Left Join）」でマージ
     for df in extracted_dfs:
         temp_merged = pd.merge(final_df, df, on="共通項目", how="left")
         
@@ -430,6 +467,7 @@ def process_files_and_tables_horizontal(excel_file):
     final_df = final_df[["共通項目"] + year_cols]
 
     # 6. サフィックス除去
+    final_df["共通項目"] = final_df["共通項目"].astype(str).str.replace(r"_temp_\d+$", "", regex=True)
     final_df["共通項目"] = final_df["共通項目"].astype(str).str.replace(r"_\d+$", "", regex=True)
 
     # リスト形式で返す
