@@ -122,22 +122,31 @@ def tool2_extract_data_horizontal(df_chunk):
     """横方向のデータを統合する関数
     
     想定される構造：
-    - 1行目に年次ヘッダー（2024, 2023, 2022, 2021など）
-    - 各年次列の左側に項目列（売上高、売上原価など）
-    - データは2行目以降
+    - 1行目に「共通項目」と年次ヘッダー（2024, 2023, 2022, 2021など）
+    - 各行に項目名とその年次ごとの数値
     """
     if df_chunk.empty:
         return None, []
     
-    # デバッグ情報
-    st.write("📊 データ構造を解析中...")
-    st.write(f"データサイズ: {df_chunk.shape[0]}行 × {df_chunk.shape[1]}列")
-    
-    # 1行目から年次ヘッダーを検出（4桁の数字）
-    year_columns = []
+    # 1行目から列の構造を解析
     first_row = df_chunk.iloc[0] if len(df_chunk) > 0 else pd.Series()
     
+    # 共通項目列を検出（通常は一番左の列）
+    item_col_idx = None
     for col_idx in range(len(first_row)):
+        cell_value = str(first_row.iloc[col_idx]).strip()
+        if "共通項目" in cell_value or col_idx == 0:
+            item_col_idx = col_idx
+            break
+    
+    if item_col_idx is None:
+        item_col_idx = 0  # デフォルトで一番左の列を項目列とする
+    
+    # 年次列を検出（4桁の数字）
+    year_columns = []
+    for col_idx in range(len(first_row)):
+        if col_idx == item_col_idx:
+            continue
         cell_value = str(first_row.iloc[col_idx]).strip()
         # 4桁の年次を検出（2000年代）
         if cell_value.isdigit() and len(cell_value) == 4 and cell_value.startswith('20'):
@@ -145,154 +154,57 @@ def tool2_extract_data_horizontal(df_chunk):
                 "col_idx": col_idx,
                 "year": cell_value
             })
-            st.write(f"✓ 年次列を検出: {cell_value} (列{col_idx})")
     
     if not year_columns:
-        st.warning("⚠️ 年次ヘッダー（4桁の西暦）が見つかりませんでした")
         return None, []
     
-    st.write(f"📅 検出された年次: {[y['year'] for y in year_columns]}")
+    # 年次で降順ソート（新しい年が左に）
+    year_columns.sort(key=lambda x: int(x["year"]), reverse=True)
     
-    # 各年次列について、対応する項目列とデータを抽出
-    block_data = []
+    # データを抽出（1行目はヘッダーなのでスキップ）
+    items = []
+    data_by_year = {yc["year"]: [] for yc in year_columns}
     
-    for year_info in year_columns:
-        year = year_info["year"]
-        data_col = year_info["col_idx"]
+    for row_idx in range(1, df_chunk.shape[0]):
+        # 項目名を取得
+        item = str(df_chunk.iloc[row_idx, item_col_idx]).strip()
         
-        # 項目列を探す：データ列の左側で最も近い、テキストが含まれる列
-        item_col = None
-        
-        # データ列の直前の列から左に向かって探索
-        for search_col in range(data_col - 1, -1, -1):
-            # その列の2行目以降をチェック
-            col_data = df_chunk.iloc[1:, search_col].astype(str).str.strip()
+        # 項目が有効な場合のみ追加
+        if item and item != "nan" and item != "":
+            items.append(item)
             
-            # 空でない、かつ意味のあるテキストが含まれるセルをカウント
-            valid_items = 0
-            for val in col_data:
-                if val and val != "nan" and val != "":
-                    # 数字のみ、または空白のみでないことを確認
-                    clean_val = val.replace(",", "").replace(".", "").replace("-", "").replace(" ", "")
-                    if not (clean_val.isdigit() or clean_val == ""):
-                        valid_items += 1
-            
-            if valid_items >= 3:  # 最低3つ以上の有効な項目
-                item_col = search_col
-                st.write(f"  → {year}年の項目列: 列{item_col} (有効項目数: {valid_items})")
-                break
-        
-        if item_col is None:
-            st.warning(f"⚠️ {year}年の項目列が見つかりませんでした")
-            continue
-        
-        # 項目と数値を抽出（1行目はヘッダーなのでスキップ）
-        items = []
-        values = []
-        
-        for row_idx in range(1, df_chunk.shape[0]):
-            item = str(df_chunk.iloc[row_idx, item_col]).strip()
-            value = str(df_chunk.iloc[row_idx, data_col]).strip()
-            
-            # 項目が有効な場合のみ追加
-            if item and item != "nan" and item != "":
-                items.append(item)
-                values.append(value)
-        
-        if items:
-            block_data.append({
-                "year": year,
-                "items": items,
-                "values": values
-            })
-            st.write(f"  ✓ {year}年: {len(items)}項目を抽出")
+            # 各年次の値を取得
+            for yc in year_columns:
+                value = str(df_chunk.iloc[row_idx, yc["col_idx"]]).strip()
+                data_by_year[yc["year"]].append(value)
     
-    if not block_data:
-        st.error("❌ 有効なデータブロックが見つかりませんでした")
+    if not items:
         return None, []
-    
-    st.success(f"✅ {len(block_data)}個の年次データを抽出しました")
-    
-    # 年次で降順ソート（新しい年が左に来るように）
-    block_data.sort(key=lambda x: int(x["year"]), reverse=True)
-    
-    # 全項目の和集合を作成（最初のブロックの順序を基準にする）
-    all_items_ordered = []
-    item_positions = {}  # 項目の最初の出現位置を記録
-    
-    # 最初のブロック（最新年）の項目順序を基準にする
-    base_block = block_data[0]
-    for idx, item in enumerate(base_block["items"]):
-        if item not in item_positions:
-            all_items_ordered.append(item)
-            item_positions[item] = len(all_items_ordered) - 1
-    
-    # 他のブロックの項目で新しいものを追加
-    for block in block_data[1:]:
-        for item in block["items"]:
-            if item not in item_positions:
-                all_items_ordered.append(item)
-                item_positions[item] = len(all_items_ordered) - 1
-    
-    st.write(f"📋 統合後の項目数: {len(all_items_ordered)}")
-    
-    # 「その他」の重複を処理
-    processed_items = []
-    sonota_count = 0
-    for item in all_items_ordered:
-        if item == "その他":
-            if sonota_count > 0:
-                processed_items.append(f"その他_temp_{sonota_count}")
-            else:
-                processed_items.append(item)
-            sonota_count += 1
-        else:
-            processed_items.append(item)
     
     # 結果DataFrameを構築
-    result_dict = {"共通項目": processed_items}
+    result_dict = {"共通項目": items}
     
-    for block in block_data:
-        year = block["year"]
+    for yc in year_columns:
+        year = yc["year"]
         year_values = []
         
-        # 項目→値のマッピングを作成
-        item_value_map = {}
-        sonota_values = []
-        
-        for i, item in enumerate(block["items"]):
-            if item == "その他":
-                sonota_values.append(block["values"][i])
-            else:
-                item_value_map[item] = block["values"][i]
-        
-        # 各項目に対応する値を取得
-        sonota_idx = 0
-        for item in processed_items:
-            value_str = None
-            
-            # 「その他_temp_N」の処理
-            if item.startswith("その他"):
-                if sonota_idx < len(sonota_values):
-                    value_str = sonota_values[sonota_idx]
-                    sonota_idx += 1
-            else:
-                value_str = item_value_map.get(item)
-            
+        for value_str in data_by_year[year]:
             # 数値変換
-            if value_str:
-                clean_value = str(value_str).replace(",", "").strip()
-                try:
-                    if clean_value and clean_value != "nan":
+            clean_value = str(value_str).replace(",", "").strip()
+            try:
+                if clean_value and clean_value != "nan" and clean_value != "":
+                    # マイナス記号の処理
+                    if clean_value.startswith("-") or "△" in clean_value:
+                        clean_value = clean_value.replace("△", "-")
                         value = float(clean_value)
-                        # 整数に変換できる場合は整数に
-                        if value == int(value):
-                            value = int(value)
                     else:
-                        value = 0
-                except:
+                        value = float(clean_value)
+                    # 整数に変換できる場合は整数に
+                    if value == int(value):
+                        value = int(value)
+                else:
                     value = 0
-            else:
+            except:
                 value = 0
             
             year_values.append(value)
@@ -301,13 +213,10 @@ def tool2_extract_data_horizontal(df_chunk):
     
     result_df = pd.DataFrame(result_dict)
     
-    # 「その他_temp_」を「その他」に戻す
-    result_df["共通項目"] = result_df["共通項目"].str.replace(r"_temp_\d+$", "", regex=True)
+    # 「その他」の重複処理は不要（既に別の行として扱われている）
     
     # 項目の順序を保存
     item_order = result_df["共通項目"].tolist()
-    
-    st.write("🎉 統合完了！")
     
     return result_df, item_order
 
@@ -416,9 +325,6 @@ def process_files_and_tables_horizontal(excel_file):
     except Exception as e:
         st.error(f"Excelファイル読み込み失敗: {e}")
         return None
-
-    st.write(f"📖 読み込んだシート: {sheet_name_to_read}")
-    st.write(f"📏 データサイズ: {df_full.shape[0]}行 × {df_full.shape[1]}列")
     
     df_full = df_full.astype(str)
     
@@ -432,15 +338,10 @@ def process_files_and_tables_horizontal(excel_file):
             start_idx = file_indices[i]
             end_idx = file_indices[i + 1] if i + 1 < len(file_indices) else len(df_full)
             file_chunks.append(df_full.iloc[start_idx:end_idx].reset_index(drop=True))
-    
-    st.write(f"📁 ファイルチャンク数: {len(file_chunks)}")
 
     all_table_results = []
-    chunk_counter = 0
 
-    for file_idx, file_chunk in enumerate(file_chunks):
-        st.write(f"\n--- ファイルチャンク {file_idx + 1} を処理中 ---")
-        
+    for file_chunk in file_chunks:
         # ページ区切りを検出
         page_indices = file_chunk[file_chunk[0].str.contains(r"--- ページ", na=False)].index.tolist()
         table_chunks = []
@@ -468,16 +369,11 @@ def process_files_and_tables_horizontal(excel_file):
             ].dropna(how="all")
             if not clean_chunk.empty:
                 table_chunks.append(clean_chunk)
-        
-        st.write(f"  テーブルチャンク数: {len(table_chunks)}")
 
         # 各テーブルチャンクを処理
-        for table_idx, table_chunk in enumerate(table_chunks):
+        for table_chunk in table_chunks:
             if table_chunk.empty:
                 continue
-            
-            chunk_counter += 1
-            st.write(f"\n🔍 テーブル {chunk_counter} を解析中...")
             
             processed_df, item_order = tool2_extract_data_horizontal(
                 table_chunk.reset_index(drop=True)
@@ -485,15 +381,10 @@ def process_files_and_tables_horizontal(excel_file):
             
             if processed_df is not None and not processed_df.empty:
                 all_table_results.append(processed_df)
-                st.write(f"✅ テーブル {chunk_counter}: 統合成功")
-            else:
-                st.write(f"⚠️ テーブル {chunk_counter}: データなし")
 
     if not all_table_results:
-        st.error("❌ 統合可能なデータが見つかりませんでした")
         return None
 
-    st.success(f"🎊 合計 {len(all_table_results)} 個のテーブルを統合しました")
     return all_table_results
 
 
